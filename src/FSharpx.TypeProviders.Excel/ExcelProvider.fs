@@ -7,60 +7,100 @@ open Microsoft.FSharp.Core.CompilerServices
 open Microsoft.Office.Interop
 open FSharpx.TypeProviders.Helper
 open System.Collections.Generic
+open ClosedXML.Excel
 
-let ApplyMoveToRange (rg:Excel.Range) (move:Excel.XlDirection) = rg.Worksheet.Range(rg, rg.End(move))
-
-let internal getRange (xlWorkBookInput : Excel.Workbook) sheetorrangename (headerRow : int) =
-    let mysheets = seq { for  sheet in xlWorkBookInput.Worksheets do yield sheet :?> Excel.Worksheet }
-    let names = seq { for name in xlWorkBookInput.Names do yield name :?> Excel.Name}
-    let hasWs =   Seq.exists (fun (ws:Excel.Worksheet) -> (ws.Name = sheetorrangename)) mysheets 
-    if hasWs  then 
-        let sheet = Seq.find (fun (ws:Excel.Worksheet) -> (ws.Name = sheetorrangename)) mysheets
-        let firstcell = sheet.Cells.Item(box headerRow, 1) :?> Excel.Range
-        ApplyMoveToRange (ApplyMoveToRange firstcell Excel.XlDirection.xlToRight) Excel.XlDirection.xlDown
-    else
-        let hasName =   Seq.exists (fun (ws:Excel.Name) -> (ws.Name = sheetorrangename)) names 
-        if hasName then
-        (Seq.find (fun (ws:Excel.Name) -> (ws.Name = sheetorrangename)) names ).RefersToRange
-        else
-        failwith (sprintf "Sheet or range %A was not found" sheetorrangename)
+//let ApplyMoveToRange (rg:Excel.Range) (move:Excel.XlDirection) = rg.Worksheet.Range(rg, rg.End(move))
 
 // Simple type wrapping Excel data
-type  ExcelFileInternal(filename, sheetorrangename, headerRow : int) =
-      let data  = 
-         let xlApp = new Excel.ApplicationClass()
-         xlApp.Visible <- false
-         xlApp.ScreenUpdating <- false
-         xlApp.DisplayAlerts <- false;
-         let xlWorkBookInput = xlApp.Workbooks.Open(filename)
+type  ExcelFileInternal(filename:string) =
+    //TK: document
+    //do printfn "filename in constructor = %s" filename
+    let dict = new Dictionary<string,obj[][]>()
+    let sheetsData = match Path.GetExtension(filename) with
+                        |".xlsx"-> let wb = new XLWorkbook(filename) //doc is >= 2007
+                                   let mysheets = wb.Worksheets
+                                   //mysheets |> Seq.iter (fun s -> printfn "Sht %s" s.Name)
+                                   let defnames = wb.NamedRanges
+                                   //defnames |> Seq.iter (fun rng -> printfn "Rng %s" rng.Name)
+                                   let getData (rng:IXLRange) = 
+                                            let sheetData = seq { for r in rng.RowsUsed() do
+                                                                        yield seq {for c in r.Cells() do
+                                                                                    yield c.GetValue()} |> Array.ofSeq
+                                                                } |> Array.ofSeq
+                                            sheetData
+                                   //add Sheets
+                                   for sht in mysheets do
+                                       let rng  = sht.RangeUsed()
+                                       if rng <> null then
+                                           //printfn "getData %s" sht.Name
+                                           let data = getData rng
+                                           dict.Add(sht.Name,data)
+                                   //add named ranges//TK: refactor for multiple ranges within a namedrange
+                                   for namedrng in defnames do
+                                      let rng  = namedrng.Ranges |> Seq.exactlyOne
+                                      if rng <> null then
+                                          //printfn "getData %s" namedrng.Name
+                                          let data = getData rng
+                                          dict.Add(namedrng.Name,data)
+                                   //dict.Keys |> Seq.iter (fun k -> printfn "%s" k)
+                                   dict
+                        |".xls"-> let xlApp = new Excel.ApplicationClass()//doc is < 2007, have to use offfice interop. Ho hum ...
+                                  xlApp.Visible <- false
+                                  xlApp.ScreenUpdating <- false
+                                  xlApp.DisplayAlerts <- false;
+                                  let xlWorkBookInput = xlApp.Workbooks.Open(filename)
+                                  let mysheets = seq { for  sheet in xlWorkBookInput.Worksheets do yield sheet :?> Excel.Worksheet }
+                                  let names = seq { for name in xlWorkBookInput.Names do yield name :?> Excel.Name}
+                                  let getData (xlRangeInput:Excel.Range) = 
+                                    let rows_data = seq { for row  in xlRangeInput.Rows do
+                                                            yield row :?> Excel.Range }
+                                    let res = seq { for line_data in rows_data do 
+                                                        yield ( seq { for cell in line_data.Columns do
+                                                                        if (cell  :?> Excel.Range).Value2 <> null && (cell  :?> Excel.Range).Value2.ToString() <> String.Empty then
+                                                                            if (((cell  :?> Excel.Range).NumberFormat).ToString().Contains("d")) then //this is a date with a dd in the format.
+                                                                                match Double.TryParse(((cell  :?> Excel.Range).Value2).ToString()) with
+                                                                                |true,dtDbl -> yield box (DateTime.FromOADate(dtDbl))
+                                                                                |false,_    -> yield (cell  :?> Excel.Range).Value2 
+                                                                            else
+                                                                                yield (cell  :?> Excel.Range).Value2 
+                                                                    }
+                                                                     |> Seq.filter (fun c -> c.ToString() <> String.Empty) |>Seq.toArray
+                                                               )
+                                                  }
+                                               |> Seq.toArray |> Array.filter (fun r-> r.Length > 0)
+                                    res
+                                  for sht in mysheets do
+                                        let xlRangeInput = sht.UsedRange
+                                        if xlRangeInput <> null then
+                                            let data = getData xlRangeInput
+                                            if data.Length > 0 then
+                                                dict.Add(sht.Name,data)
+                                  for rng in names do
+                                        let xlRangeInput = rng.RefersToRange
+                                        if xlRangeInput <> null then
+                                            let data = getData xlRangeInput
+                                            if data.Length > 0 then
+                                                dict.Add(rng.Name,data)
+                                  xlWorkBookInput.Close()
+                                  xlApp.Quit()
+                                  //dict.Keys |> Seq.iter (printfn "%s")
+                                  dict
+                        |_     -> failwithf "%s is not a valid path for a spreadsheet " filename
+    member __.SheetAndRangeNames = dict.Keys |> Array.ofSeq
+    member __.SheetData(name:string)  = sheetsData.[name]
 
-         let xlRangeInput = getRange xlWorkBookInput sheetorrangename headerRow
-
-         let objRangeInput = xlRangeInput.Value2 :?> obj[,]
-         let res = seq { for irow  in 2 .. objRangeInput.GetLength(0)   do
-                           yield seq { for jcol in 1 .. objRangeInput.GetLength(1)   do
-                                          yield objRangeInput.[irow,jcol] }
-                                 |> Seq.toArray }
-                     |> Seq.toArray
-
-         xlWorkBookInput.Close()
-         xlApp.Quit()
-         res
-
-      member __.Data = data
-
-type internal ReflectiveBuilder = 
-   static member Cast<'a> (args:obj) =
-      args :?> 'a
-   static member BuildTypedCast lType (args: obj) = 
-         typeof<ReflectiveBuilder>
-            .GetMethod("Cast")
-            .MakeGenericMethod([|lType|])
-            .Invoke(null, [|args|])
-
+(*type internal ReflectiveBuilder = 
+       static member Cast<'a> (args:obj) =
+          args :?> 'a
+       static member BuildTypedCast lType (args: obj) = 
+             typeof<ReflectiveBuilder>
+                .GetMethod("Cast")
+                .MakeGenericMethod([|lType|])
+                .Invoke(null, [|args|])
+*)
 type internal GlobalSingleton private () =
-   static let mutable instance = Dictionary<_, _>()
-   static member Instance = instance
+    static let mutable instance = Dictionary<_, _>()
+    static member Instance = instance
 
 let internal memoize f =
       //let cache = Dictionary<_, _>()
@@ -70,104 +110,135 @@ let internal memoize f =
               (GlobalSingleton.Instance).[x] <- res
               res
 
-
 let internal typExcel(cfg:TypeProviderConfig) =
-   // Create the main provided type
-   let excTy = ProvidedTypeDefinition(System.Reflection.Assembly.GetExecutingAssembly(), rootNamespace, "ExcelFile", Some(typeof<obj>))
-
-   let defaultHeaderRow = 1
-
-   // Parameterize the type by the file to use as a template
-   let filename = ProvidedStaticParameter("filename", typeof<string>)
-   let sheetorrangename = ProvidedStaticParameter("sheetname", typeof<string>, "Sheet1")
-   let forcestring = ProvidedStaticParameter("forcestring", typeof<bool>, false)
-   let headerRow = ProvidedStaticParameter("headerrow", typedefof<int>, defaultHeaderRow)
-
-   let staticParams = [ filename
-                        sheetorrangename   
-                        forcestring
-                        headerRow ]
-
-   do excTy.DefineStaticParameters(staticParams, fun tyName paramValues ->
-      let (filename, sheetorrangename, forcestring, headerRow) = 
-            match paramValues with
-            | [| :? string  as filename;   :? string as sheetorrangename;  :? bool as forcestring;  :? int as headerRow|] -> (filename, sheetorrangename, forcestring, headerRow)
-            | [| :? string  as filename;   :? string as sheetorrangename;  :? bool as forcestring |] -> (filename, sheetorrangename, forcestring, defaultHeaderRow)
-            | [| :? string  as filename;   :? bool as forcestring |] -> (filename, "Sheet1", forcestring, defaultHeaderRow)
-            | [| :? string  as filename|] -> (filename, "Sheet1", false, defaultHeaderRow)
-            | _ -> ("no file specified to type provider", "",  true, defaultHeaderRow)
-
-         // [| :? string as filename ,  :? bool  as forcestring |]
-         // resolve the filename relative to the resolution folder
-      let resolvedFilename = Path.Combine(cfg.ResolutionFolder, filename)
-
-      let ProvidedTypeDefinitionExcelCall (filename, sheetorrangename,  forcestring, headerRow)  =
-         let xlApp = new Excel.ApplicationClass()
-         let xlWorkBookInput = xlApp.Workbooks.Open(resolvedFilename)
-
-         let xlRangeInput = getRange xlWorkBookInput sheetorrangename headerRow
-
-         let lines = (seq { for row in xlRangeInput.Rows do yield row } |> Seq.cache)
-         let headerLine =  (Seq.head   lines):?> Excel.Range
-         // define a provided type for each row, erasing to a float[]
-         let rowTy = ProvidedTypeDefinition("Row", Some(typeof<obj[]>))
-
-         let oFirstdataLine  =  
-            match (Seq.length lines) with
-               | 1 -> None
-               | _  -> Some( lines |> Seq.skip 1 |> Seq.head :?> Excel.Range)            
-
-         // add one property per Excel field
-         for i in 0 .. (headerLine.Columns.Count - 1 ) do
-
-            let header = (headerLine.Cells.Item(1,i+1) :?> Excel.Range).Value2
-            if header <> null then do
-                let headerText = header.ToString()
-            
-                let valueType, gettercode  = 
-                   if  forcestring || oFirstdataLine = None then
-                      typeof<string>, (fun [row] -> <@@ ((%%row:obj[]).[i]) |> string  @@>)
-                   else
-                      let firstdataLine = oFirstdataLine.Value
-                      if xlApp.WorksheetFunction.IsText(firstdataLine.Cells.Item(1,i+1)) then
-                         typeof<string>, (fun [row] -> <@@ ((%%row:obj[]).[i]) |> string  @@>)
-                      elif xlApp.WorksheetFunction.IsNumber(firstdataLine.Cells.Item(1,i+1)) then
-                         typeof<float> , (fun [row] -> <@@ ((%%row:obj[]).[i]) :?> float  @@>)
-                      else
-                         typeof<string>, (fun [row] -> <@@ ((%%row:obj[]).[i]) |> string  @@>)
-
-                //TODO : test w different types
-                let prop = ProvidedProperty(headerText, valueType, GetterCode = gettercode)
-                // Add metadata defining the property's location in the referenced file
-                prop.AddDefinitionLocation(1, i, filename)
-                rowTy.AddMember(prop)
-
-         xlWorkBookInput.Close()
-         xlApp.Quit()
-
-         // define the provided type, erasing to excelFile
-         let ty = ProvidedTypeDefinition(System.Reflection.Assembly.GetExecutingAssembly(), rootNamespace, tyName, Some(typeof<ExcelFileInternal>))
-
-         // add a parameterless constructor which loads the file that was used to define the schema
-         ty.AddMember(ProvidedConstructor([], InvokeCode = fun [] -> <@@ ExcelFileInternal(resolvedFilename, sheetorrangename, headerRow) @@>))
-         // add a constructor taking the filename to load
-         ty.AddMember(ProvidedConstructor([ProvidedParameter("filename", typeof<string>)], InvokeCode = fun [filename] -> <@@  ExcelFileInternal(%%filename, sheetorrangename, headerRow) @@>))
-         // add a new, more strongly typed Data property (which uses the existing property at runtime)
-         ty.AddMember(ProvidedProperty("Data", typedefof<seq<_>>.MakeGenericType(rowTy), GetterCode = fun [excFile] -> <@@ (%%excFile:ExcelFileInternal).Data @@>))
-         // add the row type as a nested type
-         ty.AddMember(rowTy)
-         ty
-
-      (memoize ProvidedTypeDefinitionExcelCall)(filename, sheetorrangename, forcestring, headerRow)
-      )
-
-   // add the type to the namespace
-   excTy
+      // Create the main provided type
+      let excTy = ProvidedTypeDefinition(System.Reflection.Assembly.GetExecutingAssembly(), rootNamespace, "ExcelFile", Some(typeof<ExcelFileInternal>))
+      do excTy.AddXmlDoc("The main provided type - static parameters of filename:string, forcestring:bool. \n If forcestring, all data will be coerced to string")
+      let defaultHeaderRow = 1
+      // Parameterize the type by the file to use as a template
+      let filename = ProvidedStaticParameter("filename", typeof<string>)
+      let forcestring = ProvidedStaticParameter("forecstring", typeof<bool>,false)
+      let headerRow = ProvidedStaticParameter("headerrow", typedefof<int>, defaultHeaderRow)
+      let staticParams = [filename
+                          forcestring
+                          headerRow]
+      do excTy.DefineStaticParameters(staticParams, fun tyName paramValues ->
+        let filename,forcestring,headerRow = 
+                                   match paramValues with
+                                   | [| :? string  as filename;   :? bool as forcestring; :? int as headerRow|] -> (filename, forcestring,headerRow)
+                                   | [| :? string  as filename;   :? bool as forcestring|] -> (filename, forcestring, defaultHeaderRow)
+                                   | [| :? string  as filename|] -> (filename, false, defaultHeaderRow)
+                                   | _ -> ("no file specified to type provider",  true, defaultHeaderRow)
+        let resolvedFilename = Path.Combine(cfg.ResolutionFolder, filename)
+        //printfn "resFileName = %s; filename = %s" resolvedFilename filename
+        let ex = ExcelFileInternal(resolvedFilename)
+        // define the provided type, erasing to excelFile
+        let ty = ProvidedTypeDefinition(System.Reflection.Assembly.GetExecutingAssembly(), rootNamespace, tyName, Some(typeof<ExcelFileInternal>))
+        
+        // add a parameterless constructor
+        ty.AddMember(ProvidedConstructor([], InvokeCode = fun [] -> <@@  ExcelFileInternal(resolvedFilename) @@>))
+        //ty.AddMember(ProvidedConstructor([], InvokeCode = fun [] -> <@@  ex @@>))
+        ty.AddMember(ProvidedConstructor([ProvidedParameter("filename", typeof<string>)], InvokeCode = fun [filename] -> <@@  ExcelFileInternal(%%filename) @@>))
+        //for each worksheet (with data), add a property of provided type shtTyp
+        for sht in ex.SheetAndRangeNames do
+            let shtTyp = if  forcestring then
+                            ProvidedTypeDefinition(sht,Some typeof<string[][]>,HideObjectMethods = true)
+                         else
+                            ProvidedTypeDefinition(sht,Some typeof<obj[][]>,HideObjectMethods = true)
+            do shtTyp.AddXmlDoc(sprintf "Type for data in %s" sht)
+            let data = ex.SheetData(sht)
+            let rowTyp = ProvidedTypeDefinition("Row", 
+                                                (if forcestring then 
+                                                    Some typeof<string[]>
+                                                else 
+                                                    Some typeof<obj[]>), 
+                                                HideObjectMethods = true)
+            shtTyp.AddMember(rowTyp)
+            let rowsProp = ProvidedProperty(propertyName = "Rows",
+                                            propertyType = typedefof<seq<_>>.MakeGenericType(rowTyp),
+                                            GetterCode = if forcestring then 
+                                                            (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:string[][])
+                                                                                                  |> Seq.skip 1 
+                                                                                                  |> Array.ofSeq 
+                                                                                                  |> Array.map ( fun row -> row |> Array.map (fun cel -> cel.ToString())) 
+                                                                                                 @@>)
+                                                         else
+                                                            (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[][])
+                                                                                                  |> Seq.skip 1 
+                                                                                                  |> Array.ofSeq 
+                                                                                                 @@>)
+                                                         )
+            let colHdrs = data.[0]
+            colHdrs |> Array.iteri (fun j col -> let propName = match col.ToString() with
+                                                                |"" -> "Col" + j.ToString()
+                                                                |_  ->  col.ToString()
+                                                 let valueType, gettercode  = if forcestring then typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:string[])).[j] @@>)
+                                                                              else
+                                                                              match data.[1].[j] with
+                                                                              | :? bool   -> typeof<bool>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])   |> Array.map (fun o -> bool.Parse(o.ToString()))).[j] @@>)
+                                                                              | :? string -> typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[]) |> Array.map (sprintf "%A")).[j] @@>)
+                                                                              | :? DateTime  -> typeof<DateTime>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> DateTime.Parse(o.ToString()))).[j] @@>)
+                                                                              | :? float  -> typeof<float>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> Double.Parse(o.ToString()))).[j] @@>)
+                                                                              |_          -> typeof<obj>,(fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[]).[j] @@>)
+                                                 let colp = ProvidedProperty(propertyName = propName,
+                                                                             propertyType = valueType,
+                                                                             GetterCode= gettercode)
+                                                 rowTyp.AddMember(colp))
+            data |> Array.iteri (fun i r -> if i > 0 then //skip header col
+                                                let rowTyp =  if  forcestring then
+                                                                ProvidedTypeDefinition("Row" + i.ToString(),Some typeof<string[]>,HideObjectMethods = true)
+                                                              else
+                                                                ProvidedTypeDefinition("Row" + i.ToString(),Some typeof<obj[]>,HideObjectMethods = true)
+                                                let getCode = if forcestring then
+                                                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:string[][]).[i] @@>)
+                                                              else
+                                                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[][]).[i] @@>)
+                                                let rowp = ProvidedProperty(propertyName = "Row" + i.ToString(),
+                                                                            propertyType = rowTyp,
+                                                                            GetterCode = getCode
+                                                                            )
+                                                colHdrs |> Array.iteri (fun j col -> let propName = match col.ToString() with
+                                                                                                    |"" -> "Col" + j.ToString()
+                                                                                                    |_  ->  col.ToString()
+                                                                                     let valueType, gettercode  = if forcestring then typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:string[])).[j] @@>)
+                                                                                                                  else
+                                                                                                                  match r.[j] with
+                                                                                                                  | :? bool      -> typeof<bool>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])   |> Array.map (fun o -> bool.Parse(o.ToString()))).[j] @@>)
+                                                                                                                  | :? string    -> typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[]) |> Array.map (sprintf "%A")).[j] @@>)
+                                                                                                                  | :? float     -> typeof<float>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> Double.Parse(o.ToString()))).[j] @@>)
+                                                                                                                  | :? DateTime  -> typeof<DateTime>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> DateTime.Parse(o.ToString()))).[j] @@>)
+                                                                                                                  |_          -> typeof<obj>,(fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[] ).[j] @@>)
+                                                                                     let colp = ProvidedProperty(propertyName = propName,
+                                                                                                                 propertyType = valueType,
+                                                                                                                 GetterCode= gettercode)
+                                                                                     colp.AddXmlDoc(sprintf "Value for Cell in Col%d in Row%d in range %s" j i sht)
+                                                                                     rowTyp.AddMember(colp)
+                                                                       )
+                                                shtTyp.AddMember(rowTyp)
+                                                rowp.AddXmlDoc(sprintf "Data for Row%d in range %s" i sht)
+                                                shtTyp.AddMember(rowp)
+                                )
+            //data |> Array
+            let shtGetCode = if forcestring then
+                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:ExcelFileInternal).SheetData(sht) |> Array.map ( fun row -> row |> Array.map (fun cel -> cel.ToString())) @@>)
+                             else
+                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:ExcelFileInternal).SheetData(sht) @@>)
+            let shtp = ProvidedProperty(propertyName = sht, 
+                                        propertyType = shtTyp,
+                                        GetterCode= shtGetCode
+                                       )
+            do shtp.AddXmlDoc(sprintf "Data in %s" sht)
+            shtTyp.AddMember(rowsProp)
+            ty.AddMember(shtTyp)
+            ty.AddMember(shtp)
+        ty
+        //(memoize ProvidedTypeDefinitionExcelCall)(filename, sheetorrangename ,  forcestring)
+        )
+      excTy
 
 [<TypeProvider>]
 type public ExcelProvider(cfg:TypeProviderConfig) as this =
     inherit TypeProviderForNamespaces()
-
     do this.AddNamespace(rootNamespace,[typExcel cfg])
 
 [<TypeProviderAssembly>]
