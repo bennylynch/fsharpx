@@ -16,6 +16,7 @@ type  ExcelFileInternal(filename:string) =
     //TK: document
     //do printfn "filename in constructor = %s" filename
     let dict = new Dictionary<string,obj[][]>()
+    let mutable _names = [||]
     let sheetsData = match Path.GetExtension(filename) with
                         |".xlsx"-> let wb = new XLWorkbook(filename) //doc is >= 2007
                                    let mysheets = wb.Worksheets
@@ -34,14 +35,16 @@ type  ExcelFileInternal(filename:string) =
                                        if rng <> null then
                                            //printfn "getData %s" sht.Name
                                            let data = getData rng
-                                           dict.Add(sht.Name,data)
+                                           if data.Length > 0 then
+                                                dict.Add(sht.Name,data)
                                    //add named ranges//TK: refactor for multiple ranges within a namedrange
                                    for namedrng in defnames do
                                       let rng  = namedrng.Ranges |> Seq.exactlyOne
                                       if rng <> null then
                                           //printfn "getData %s" namedrng.Name
                                           let data = getData rng
-                                          dict.Add(namedrng.Name,data)
+                                          if data.Length > 0 then
+                                            dict.Add(namedrng.Name,data)
                                    //dict.Keys |> Seq.iter (fun k -> printfn "%s" k)
                                    dict
                         |".xls"-> let xlApp = new Excel.ApplicationClass()//doc is < 2007, have to use offfice interop. Ho hum ...
@@ -62,7 +65,7 @@ type  ExcelFileInternal(filename:string) =
                                                                                 |true,dtDbl -> yield box (DateTime.FromOADate(dtDbl))
                                                                                 |false,_    -> yield (cell  :?> Excel.Range).Value2 
                                                                             else
-                                                                                yield (cell  :?> Excel.Range).Value2 
+                                                                                yield (cell  :?> Excel.Range).Value2
                                                                     }
                                                                      |> Seq.filter (fun c -> c.ToString() <> String.Empty) |>Seq.toArray
                                                                )
@@ -86,6 +89,7 @@ type  ExcelFileInternal(filename:string) =
                                   //dict.Keys |> Seq.iter (printfn "%s")
                                   dict
                         |_     -> failwithf "%s is not a valid path for a spreadsheet " filename
+    member __.names = _names
     member __.SheetAndRangeNames = dict.Keys |> Array.ofSeq
     member __.SheetData(name:string)  = sheetsData.[name]
 
@@ -113,7 +117,7 @@ let internal memoize f =
 let internal typExcel(cfg:TypeProviderConfig) =
       // Create the main provided type
       let excTy = ProvidedTypeDefinition(System.Reflection.Assembly.GetExecutingAssembly(), rootNamespace, "ExcelFile", Some(typeof<ExcelFileInternal>))
-      do excTy.AddXmlDoc("The main provided type - static parameters of filename:string, forcestring:bool. \n If forcestring, all data will be coerced to string")
+      do excTy.AddXmlDoc("The main provided type - static parameters of filename:string, forcestring:bool, headerrow:int. \n If forcestring, all data will be coerced to string")
       let defaultHeaderRow = 1
       // Parameterize the type by the file to use as a template
       let filename = ProvidedStaticParameter("filename", typeof<string>)
@@ -158,42 +162,42 @@ let internal typExcel(cfg:TypeProviderConfig) =
                                             propertyType = typedefof<seq<_>>.MakeGenericType(rowTyp),
                                             GetterCode = if forcestring then 
                                                             (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:string[][])
-                                                                                                  |> Seq.skip 1 
+                                                                                                  |> Seq.skip (headerRow)
                                                                                                   |> Array.ofSeq 
                                                                                                   |> Array.map ( fun row -> row |> Array.map (fun cel -> cel.ToString())) 
                                                                                                  @@>)
                                                          else
                                                             (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[][])
-                                                                                                  |> Seq.skip 1 
+                                                                                                  |> Seq.skip (headerRow)
                                                                                                   |> Array.ofSeq 
                                                                                                  @@>)
                                                          )
-            let colHdrs = data.[0]
+            let  colHdrs = data.[headerRow - 1]
             colHdrs |> Array.iteri (fun j col -> let propName = match col.ToString() with
                                                                 |"" -> "Col" + j.ToString()
                                                                 |_  ->  col.ToString()
                                                  let valueType, gettercode  = if forcestring then typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:string[])).[j] @@>)
                                                                               else
-                                                                              match data.[1].[j] with
-                                                                              | :? bool   -> typeof<bool>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])   |> Array.map (fun o -> bool.Parse(o.ToString()))).[j] @@>)
-                                                                              | :? string -> typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[]) |> Array.map (sprintf "%A")).[j] @@>)
+                                                                              match data.[headerRow].[j] with
+                                                                              | :? bool   -> typeof<bool>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])         |> Array.map (fun o -> bool.Parse(o.ToString()))).[j] @@>)
+                                                                              | :? string -> typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])       |> Array.map (sprintf "%A")).[j] @@>)
                                                                               | :? DateTime  -> typeof<DateTime>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> DateTime.Parse(o.ToString()))).[j] @@>)
-                                                                              | :? float  -> typeof<float>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> Double.Parse(o.ToString()))).[j] @@>)
+                                                                              | :? float  -> typeof<float>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])        |> Array.map (fun o -> Double.Parse(o.ToString()))).[j] @@>)
                                                                               |_          -> typeof<obj>,(fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[]).[j] @@>)
                                                  let colp = ProvidedProperty(propertyName = propName,
                                                                              propertyType = valueType,
                                                                              GetterCode= gettercode)
                                                  rowTyp.AddMember(colp))
-            data |> Array.iteri (fun i r -> if i > 0 then //skip header col
+            data |> Array.iteri (fun i r -> if i > (headerRow - 1) then //skip header col
                                                 let rowTyp =  if  forcestring then
-                                                                ProvidedTypeDefinition("Row" + i.ToString(),Some typeof<string[]>,HideObjectMethods = true)
+                                                                ProvidedTypeDefinition("Row" + (i - headerRow + 1).ToString(),Some typeof<string[]>,HideObjectMethods = true)
                                                               else
-                                                                ProvidedTypeDefinition("Row" + i.ToString(),Some typeof<obj[]>,HideObjectMethods = true)
+                                                                ProvidedTypeDefinition("Row" + (i - headerRow + 1).ToString(),Some typeof<obj[]>,HideObjectMethods = true)
                                                 let getCode = if forcestring then
-                                                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:string[][]).[i] @@>)
+                                                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:string[][]).[(i - headerRow + 1)] @@>)
                                                               else
-                                                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[][]).[i] @@>)
-                                                let rowp = ProvidedProperty(propertyName = "Row" + i.ToString(),
+                                                                (fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[][]).[(i - headerRow + 1)] @@>)
+                                                let rowp = ProvidedProperty(propertyName = "Row" + (i - headerRow + 1).ToString(),
                                                                             propertyType = rowTyp,
                                                                             GetterCode = getCode
                                                                             )
@@ -203,19 +207,19 @@ let internal typExcel(cfg:TypeProviderConfig) =
                                                                                      let valueType, gettercode  = if forcestring then typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:string[])).[j] @@>)
                                                                                                                   else
                                                                                                                   match r.[j] with
-                                                                                                                  | :? bool      -> typeof<bool>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])   |> Array.map (fun o -> bool.Parse(o.ToString()))).[j] @@>)
-                                                                                                                  | :? string    -> typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[]) |> Array.map (sprintf "%A")).[j] @@>)
-                                                                                                                  | :? float     -> typeof<float>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> Double.Parse(o.ToString()))).[j] @@>)
-                                                                                                                  | :? DateTime  -> typeof<DateTime>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])  |> Array.map (fun o -> DateTime.Parse(o.ToString()))).[j] @@>)
+                                                                                                                  | :? bool      -> typeof<bool>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])     |> Array.map (fun o -> bool.Parse(o.ToString()))).[j] @@>)
+                                                                                                                  | :? string    -> typeof<string>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])   |> Array.map (sprintf "%A")).[j] @@>)
+                                                                                                                  | :? DateTime  -> typeof<DateTime>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[]) |> Array.map (fun o -> DateTime.Parse(o.ToString()))).[j] @@>)
+                                                                                                                  | :? float     -> typeof<float>,(fun (args:Quotations.Expr list) -> <@@ ((%%args.[0]:obj[])    |> Array.map (fun o -> Double.Parse(o.ToString()))).[j] @@>)
                                                                                                                   |_          -> typeof<obj>,(fun (args:Quotations.Expr list) -> <@@ (%%args.[0]:obj[] ).[j] @@>)
                                                                                      let colp = ProvidedProperty(propertyName = propName,
                                                                                                                  propertyType = valueType,
                                                                                                                  GetterCode= gettercode)
-                                                                                     colp.AddXmlDoc(sprintf "Value for Cell in Col%d in Row%d in range %s" j i sht)
+                                                                                     colp.AddXmlDoc(sprintf "Value for Cell in Col%d in Row%d in range %s" j (i - headerRow + 1) sht)
                                                                                      rowTyp.AddMember(colp)
                                                                        )
                                                 shtTyp.AddMember(rowTyp)
-                                                rowp.AddXmlDoc(sprintf "Data for Row%d in range %s" i sht)
+                                                rowp.AddXmlDoc(sprintf "Data for Row%d in range %s" (i - headerRow + 1) sht)
                                                 shtTyp.AddMember(rowp)
                                 )
             //data |> Array
