@@ -46,6 +46,11 @@ let ``Can access typed row as string  data by closedXML``() =
     row1.SEC |> should equal "ASI"
     row1.BROKER |> should equal "TFS Derivatives HK"
 
+[<Test>]
+let ``Can access data in range using closedXML``() = 
+    let row1 = xlsxFileForceString.ThisIsaRange.Row1
+    row1.SEC |> should equal "ASI from range"
+    row1.BROKER |> should equal "TFS Derivatives HK"
 
 [<Test>]
 let ``Can pick an arbitrary header row``() =
