@@ -5,6 +5,7 @@ open System
 open Samples.FSharp.ProvidedTypes
 open Microsoft.FSharp.Core.CompilerServices
 open Microsoft.Office.Interop
+open System.Runtime.InteropServices
 open FSharpx.TypeProviders.Helper
 open System.Collections.Generic
 open ClosedXML.Excel
@@ -51,10 +52,13 @@ type  ExcelFileInternal(filename:string, rowsToSkip:int) =
                                   xlApp.ScreenUpdating <- false
                                   xlApp.DisplayAlerts <- false;
                                   let xlWorkBookInput = xlApp.Workbooks.Open(filename)
-                                  let mysheets = seq { for  sheet in xlWorkBookInput.Worksheets do yield sheet :?> Excel.Worksheet }
-                                  let names = seq { for name in xlWorkBookInput.Names do yield name :?> Excel.Name}
+                                  let _mysheets = xlWorkBookInput.Worksheets
+                                  let mysheets = seq { for  sheet in _mysheets do yield sheet :?> Excel.Worksheet }
+                                  let _names = xlWorkBookInput.Names
+                                  let names = seq { for name in _names  do yield name :?> Excel.Name}
                                   let getData (xlRangeInput:Excel.Range) = 
-                                    let rows_data = seq { for row  in xlRangeInput.Rows do
+                                    let rows_data = let _rows = xlRangeInput.Rows
+                                                    seq { for row  in _rows do
                                                             yield row :?> Excel.Range }
                                     let res = seq { for line_data in rows_data do 
                                                         yield ( seq { for cell in line_data.Columns do
@@ -84,7 +88,15 @@ type  ExcelFileInternal(filename:string, rowsToSkip:int) =
                                             if data.Length > rowsToSkip then
                                                 dict.Add(rng.Name,data |> Seq.skip rowsToSkip |> Array.ofSeq)
                                   xlWorkBookInput.Close()
+                                  // Cleanup
+                                  GC.Collect();
+                                  GC.WaitForPendingFinalizers();
+                                  Marshal.FinalReleaseComObject(_names) |> ignore
+                                  Marshal.FinalReleaseComObject(_mysheets) |> ignore
+                                  xlWorkBookInput.Close(Type.Missing, Type.Missing, Type.Missing)
+                                  Marshal.FinalReleaseComObject(xlWorkBookInput) |> ignore
                                   xlApp.Quit()
+                                  Marshal.FinalReleaseComObject(xlApp) |> ignore
                                   //dict.Keys |> Seq.iter (printfn "%s")
                                   dict
                         |_     -> failwithf "%s is not a valid path for a spreadsheet " filename
